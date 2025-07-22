@@ -1,0 +1,11 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: granite
+  namespace: aireilly-rhaiis
+spec:
+  to:
+    kind: Service
+    name: granite
+  port:
+    targetPort: 80
