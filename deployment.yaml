@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: granite
+  namespace: aireilly-rhaiis
+  labels:
+    app: granite
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: granite
+  template:
+    metadata:
+      labels:
+        app: granite
+    spec:
+      imagePullSecrets:
+        - name: docker-secret
+      volumes:
+        - name: model-volume
+          persistentVolumeClaim:
+            claimName: model-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "2Gi"
+        - name: oci-auth
+          secret:
+            secretName: docker-secret
+            items:
+              - key: .dockercfg
+                path: config.json
+      serviceAccountName: default
+      initContainers:
+        - name: fetch-model
+          image: ghcr.io/oras-project/oras:v1.2.0
+          env:
+            - name: DOCKER_CONFIG
+              value: /auth
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              set -e
+              # Only pull if /model is empty
+              if [ -z "$(ls -A /model)" ]; then
+                echo "Pulling model..."
+                oras pull registry.redhat.io/rhelai1/granite-3-1-8b-instruct-quantized-w8a8:1.5 \
+                  --output /model \
+              else
+                echo "Model already present, skipping model pull"
+              fi
+          volumeMounts:
+            - name: model-volume
+              mountPath: /model
+            - name: oci-auth
+              mountPath: /auth
+              readOnly: true
+      containers:
+        - name: granite
+          image: 'registry.redhat.io/rhaiis/vllm-cuda-rhel9@sha256:a6645a8e8d7928dce59542c362caf11eca94bb1b427390e78f0f8a87912041cd'
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: VLLM_SERVER_DEV_MODE
+              value: '1'
+          command:
+            - python
+            - '-m'
+            - vllm.entrypoints.openai.api_server
+          args:
+            - '--port=8000'
+            - '--model=/model'
+            - '--served-model-name=granite-3-1-8b-instruct-quantized-w8a8'
+            - '--tensor-parallel-size=1'
+          resources:
+            limits:
+              cpu: '10'
+              nvidia.com/gpu: '1'
+              memory: 16Gi
+            requests:
+              cpu: '2'
+              memory: 6Gi
+              nvidia.com/gpu: '1'
+          volumeMounts:
+            - name: model-volume
+              mountPath: /model
+            - name: shm
+              mountPath: /dev/shm
+      restartPolicy: Always
