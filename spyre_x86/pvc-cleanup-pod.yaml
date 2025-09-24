@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pvc-cleanup
+  namespace: vllm-inference
+spec:
+  securityContext:
+    runAsUser: 2000
+    runAsGroup: 2000
+    fsGroup: 2000
+  containers:
+  - name: cleanup
+    image: registry.access.redhat.com/ubi9/ubi-minimal
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: models
+      mountPath: /mnt/models
+    securityContext:
+      runAsUser: 2000
+      runAsGroup: 2000
+  volumes:
+  - name: models
+    persistentVolumeClaim:
+      claimName: vllm-pvc
+  nodeSelector:
+    kubernetes.io/hostname: spyre-001.nvidia.eng.rdu2.dc.redhat.com

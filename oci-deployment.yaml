@@ -1,19 +1,19 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: granite
+  name: rhaiis-oci-deploy
   namespace: aireilly-rhaiis
   labels:
     app: granite
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
-      app: granite
+      app: rhaiis-oci-deploy
   template:
     metadata:
       labels:
-        app: granite
+        app: rhaiis-oci-deploy
     spec:
       imagePullSecrets:
         - name: docker-secret
@@ -31,24 +31,20 @@ spec:
             items:
               - key: .dockercfg
                 path: config.json
-      serviceAccountName: default
       initContainers:
         - name: fetch-model
           image: ghcr.io/oras-project/oras:v1.2.0
-          env:
-            - name: DOCKER_CONFIG
-              value: /auth
           command: ["/bin/sh","-c"]
           args:
             - |
               set -e
               # Only pull if /model is empty
               if [ -z "$(ls -A /model)" ]; then
-                echo "Pulling model..."
-                oras pull registry.redhat.io/rhelai1/granite-3-1-8b-instruct-quantized-w8a8:1.5 \
+                echo "Pulling model…"
+                oras pull quay.io/rhn_support_aireilly/modelcar-containers \
                   --output /model \
               else
-                echo "Model already present, skipping model pull"
+                echo "Model already present, skipping pull"
               fi
           volumeMounts:
             - name: model-volume
@@ -70,7 +66,7 @@ spec:
           args:
             - '--port=8000'
             - '--model=/model'
-            - '--served-model-name=granite-3-1-8b-instruct-quantized-w8a8'
+            - '--served-model-name=ibm-granite/granite-3.1-2b-instruct'
             - '--tensor-parallel-size=1'
           resources:
             limits:
@@ -91,23 +87,23 @@ spec:
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
-  name: granite
+  name: rhaiis-oci-deploy
   namespace: aireilly-rhaiis
 spec:
   to:
     kind: Service
-    name: granite
+    name: rhaiis-oci-deploy
   port:
     targetPort: http
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: granite
+  name: rhaiis-oci-deploy
   namespace: aireilly-rhaiis
 spec:
   selector:
-    app: granite
+    app: rhaiis-oci-deploy
   ports:
     - name: http
       port: 80

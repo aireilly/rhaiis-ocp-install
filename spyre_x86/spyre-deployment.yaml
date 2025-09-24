@@ -1,0 +1,134 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: granite-3-1-8b-instruct
+  labels:
+    app: granite-3-1-8b-instruct
+  namespace: vllm-inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: granite-3-1-8b-instruct
+  template:
+    metadata:
+      labels:
+        app: granite-3-1-8b-instruct
+    spec:
+      imagePullSecrets:
+        - name: docker-secret
+      initContainers:
+        - name: fetch-model
+          image: ghcr.io/oras-project/oras:v1.2.0
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              set -e
+              # Only pull if /mnt/models is empty
+              if [ -z "$(ls -A /mnt/models)" ]; then
+                echo "Pulling model..."
+                oras pull oras pull registry.redhat.io/rhelai1/granite-3-1-8b-instruct:1.5 \
+                --registry-config /auth/config.json \
+                --output /mnt/models
+              else
+                echo "Model already present, skipping pull"
+              fi
+          volumeMounts:
+            - name: torch-sendnn-cache
+              mountPath: /mnt/models
+            - name: oci-auth
+              mountPath: /auth
+              readOnly: true
+      restartPolicy: Always
+      schedulerName: spyre-scheduler
+      containers:
+        - resources:
+            limits:
+              ibm.com/spyre_pf: '2'
+            requests:
+              ibm.com/spyre_pf: '2'
+          terminationMessagePath: /dev/termination-log
+          lifecycle:
+            preStop:
+              httpGet:
+                path: /wait-for-drain
+                port: 8022
+                scheme: HTTP
+          name: vllm
+          env:
+            - name: SERVED_MODEL_NAME
+              value: "granite-3-1-8b-instruct"
+            - name: VLLM_SPYRE_USE_CB
+              value: "1"
+            - name: TORCH_SENDNN_CACHE_DIR
+              value: /mnt/models/torch_sendnn_cache
+            - name: VLLM_SPYRE_WARMUP_PROMPT_LENS
+              value: ''
+            - name: VLLM_SPYRE_WARMUP_NEW_TOKENS
+              value: ''
+            - name: VLLM_SPYRE_WARMUP_BATCH_SIZES
+              value: ''
+            - name: SPYRE_DEVICES
+              value: '0,1'
+          ports:
+            - name: user-port
+              containerPort: 3000
+              protocol: TCP
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: dev-shm
+              mountPath: /dev/shm
+            - name: torch-sendnn-cache
+              mountPath: /mnt/models
+            - name: oci-auth
+              mountPath: /auth
+              readOnly: true
+          image: registry.redhat.io/rhaiis/vllm-spyre-rhel9:3.2.4
+          args:
+            - --host=0.0.0.0
+            - --port=3000
+            - --model=/mnt/models
+            - --max_model_len=4096
+            - --max_num_seqs=8
+            - --tensor-parallel-size=2
+      volumes:
+        - name: dev-shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Gi
+        - name: torch-sendnn-cache
+          persistentVolumeClaim:
+            claimName: vllm-pvc
+        - name: oci-auth
+          secret:
+            secretName: docker-secret
+            items:
+              - key: .dockercfg
+                path: config.json
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rhaiis-granite-3-1-8b-instruct
+  namespace: vllm-inference
+spec:
+  selector:
+    app: granite-3-1-8b-instruct
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: rhaiis-granite-3-1-8b-instruct
+  namespace: vllm-inference
+  annotations:
+    haproxy.router.openshift.io/timeout: 1m
+spec:
+  to:
+    kind: Service
+    name: rhaiis-granite-3-1-8b-instruct
+  port:
+    targetPort: http
