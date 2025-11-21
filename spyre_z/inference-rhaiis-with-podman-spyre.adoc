@@ -1,0 +1,294 @@
+= Inferencing with Podman using IBM Spyre on bare metal IBM Power or IBM Z
+
+You can Inference serve a large language model with Podman and Red Hat AI Inference Server running on IBM Spyre accelerators.
+
+.Prerequisites
+
+* You have access to a Power 11 or BM z/S390 system running RHEL9.6 with IBM Spyre AI accelerators installed.
+
+* You are logged in as a user with sudo access.
+
+* You have installed Podman on the system.
+
+* You have a Hugging Face account, have generated a Hugging Face access token, and have huggingface-cli installed. You have pre-populated `~/models/` with the models you need.
+
+* You have access to `registry.redhat.io` and have logged in.
+
+* You have installed the ServiceReport rpm on your host from link:https://www.ibm.com/support/pages/service-and-productivity-tools[], and run the `servicereport` command.
+For example:
++
+[source,terminal]
+----
+$ servicereport -r -p spyre
+----
++
+.Example output
+[source,terminal]
+----
+servicereport 2.2.5
+
+Spyre configuration checks                          PASS
+
+  VFIO Driver configuration                         PASS
+  User memlock configuration                        PASS
+  sos config                                        PASS
+  sos package                                       PASS
+  VFIO udev rules configuration                     PASS
+  User group configuration                          PASS
+  VFIO device permission                            PASS
+  VFIO kernel module loaded                         PASS
+  VFIO module dep configuration                     PASS
+----
+
+.Procedure
+
+. Open a terminal on your server host, and log in to `registry.redhat.io`:
++
+[source,terminal]
+----
+$ podman login registry.redhat.io
+----
+
+. Pull the Red Hat AI Inference Server image by running the following command:
++
+[source,terminal,subs="attributes+"]
+----
+$ podman pull registry.redhat.io/rhaiis/vllm-spyre:3.2.4
+----
+
+. If your system has SELinux enabled, configure SELinux to allow device access:
++
+[source,terminal]
+----
+$ sudo setsebool -P container_use_devices 1
+----
+
+. Start the AI Inference Server container image.
+
+.. For IBM Spyre for Power accelerators, use `lspci -v` to verify that the container can access the host system IBM Spyre Accellerators:
++
+[source,terminal,subs="attributes+"]
+----
+$ podman run -it --rm --pull=newer         \
+--security-opt=label=disable               \
+--device=/dev/vfio                         \
+--group-add keep-groups                    \
+--entrypoint="lspci"                       \
+{rhaiis-spyre-image}:{rhaiis-version}
+----
++
+.Example output
+[source,terminal]
+----
+0381:50:00.0 Processing accelerators: IBM Spyre Accelerator (rev 02)
+0382:60:00.0 Processing accelerators: IBM Spyre Accelerator (rev 02)
+0383:70:00.0 Processing accelerators: IBM Spyre Accelerator (rev 02)
+0384:80:00.0 Processing accelerators: IBM Spyre Accelerator (rev 02)
+----
+
+. Create a volume to mount into the container. Adjust the container permissions so that the container can use it.
++
+[source,terminal]
+----
+$ mkdir -p ~/models && chmod g+rwX ~/models
+----
+
+. Create or append your `HF_TOKEN` Hugging Face token to the `private.env` file.
+Source the `private.env` file.
++
+[source,terminal]
+----
+$ echo "export HF_TOKEN=<your_HF_token>" > private.env
+----
++
+[source,terminal]
+----
+$ source private.env
+----
+
+. Download the required Hugging Face model into the `~/models/` folder, for example:
++
+[source,terminal]
+----
+# Run the login command to huggingface
+$ huggingface-cli login --token $HF_TOKEN
+# Pull the HF model with git:
+$ git lfs install
+$ cd ~/models
+$ git clone https://huggingface.co/ibm-granite/granite-3.3-8b-instruct
+----
+
+. Gather the Spyre IDS for the VLLM_AIU_PCIE_IDS variable:
++
+[source,terminal]
+----
+# Print out card IDs and specify all 4 cards in SPYRE_IDS:
+$ lspci
+
+   0381:50:00.0 Processing accelerators: IBM Spyre Accelerator (rev 02)
+   0382:60:00.0 Processing accelerators: IBM Spyre Accelerator (rev 02)
+   0383:70:00.0 Processing accelerators: IBM Spyre Accelerator (rev 02)
+   0384:80:00.0 Processing accelerators: IBM Spyre Accelerator (rev 02)
+ 
+$ SPYRE_IDS="0381:50:00.0 0382:60:00.0 0383:70:00.0 0384:80:00.0"
+----
+
+. Start the container (Entity Extraction Type):
++
+[source,terminal,subs="attributes+"]
+----
+podman run \
+--device=/dev/vfio                          \
+-v $HOME/models:/models                     \
+-e AIU_PCIE_IDS="${SPYRE_IDS}"              \
+-e VLLM_SPYRE_USE_CB=1                      \
+--pids-limit 0                              \
+--userns=keep-id                            \
+--group-add=keep-groups                     \
+--memory 200G                               \
+--shm-size 64G                              \
+-p 8000:8000                                \
+{rhaiis-spyre-image}:{rhaiis-version}  \
+    --model /models/granite-3.3-8b-instruct \
+    -tp 4                                   \
+    --max-model-len 32768                   \
+    --max-num-seqs 32
+----
+
+.Verification
+. In a separate tab in your terminal, make a request to the model with the API.
++
+[source,terminal]
+----
+curl -X POST -H "Content-Type: application/json" -d '{
+    "model": "/models/granite-3.3-8b-instruct"
+    "prompt": "What is the capital of France?",
+    "max_tokens": 50
+}' http://<your_server_ip>:8000/v1/completions | jq
+----
++
+.Example output
+[source,json]
+----
+{
+    "id": "cmpl-b94beda1d5a4485c9cb9ed4a13072fca",
+    "object": "text_completion",
+    "created": 1746555421,
+    "choices": [
+        {
+            "index": 0,
+            "text": " Paris.\nThe capital of France is Paris.",
+            "logprobs": null,
+            "finish_reason": "stop",
+            "stop_reason": null,
+            "prompt_logprobs": null
+        }
+    ],
+    "usage": {
+        "prompt_tokens": 8,
+        "total_tokens": 18,
+        "completion_tokens": 10,
+        "prompt_tokens_details": null
+    }
+}
+----
+
+== Examples
+
+=== Entity Extraction
+
+[source,terminal,subs="attributes"]
+----
+# From lspci output above, select one card ID:
+$ SPYRE_IDS="0381:50:00.0"
+$ podman run -d                                    \
+    --device=/dev/vfio                             \
+    --name vllm-api                                \
+    -v $HOME/models:/models:Z                      \
+    -e VLLM_AIU_PCIE_IDS="${SPYRE_IDS}"            \
+    -e VLLM_SPYRE_USE_CB=1                         \
+    --pids-limit 0                                 \
+    --userns=keep-id                               \
+    --group-add=keep-groups                        \
+    --memory 100GB                                 \
+    --shm-size 64GB                                \
+    -p 8000:8000                                   \
+    {rhaiis-spyre-image}:{rhaiis-version}     \
+        --model /models/granite-3.3-8b-instruct    \
+        -tp 1                                      \
+        --max-model-len 3072                       \
+        --max-num-seqs 16
+----
+
+=== RAG Inference
+
+[source,terminal,subs="attributes"]
+----
+$ SPYRE_IDS="0381:50:00.0 0382:60:00.0 0383:70:00.0 0384:80:00.0"
+$ podman run -d                                        \
+    --device=/dev/vfio                                 \
+    --name vllm-api                                    \
+    -v $HOME/models:/models:Z                          \
+    -e VLLM_AIU_PCIE_IDS="${SPYRE_IDS}"                \
+    -e VLLM_MODEL_PATH=/models/granite-3.3-8b-instruct \
+    -e VLLM_SPYRE_USE_CB=1                             \
+    --pids-limit 0                                     \
+    --userns=keep-id                                   \
+    --group-add=keep-groups                            \
+    --memory 200GB                                     \
+    --shm-size 64GB                                    \
+    -p 8000:8000                                       \
+    {rhaiis-spyre-image}:{rhaiis-version}         \
+        --model /models/granite-3.3-8b-instruct        \
+        -tp 4                                          \
+        --max-model-len 32768                          \
+        --max-num-seqs 32
+----
+
+=== RAG Embedding
+
+[source,terminal,subs="attributes"]
+----
+$ SPYRE_IDS="0384:80:00.0"
+$ podman run -d                                               \
+    --device=/dev/vfio                                        \
+    --name vllm-api                                           \
+    -v $HOME/models:/models:Z                                 \
+    -e VLLM_AIU_PCIE_IDS="${SPYRE_IDS}"                       \
+    -e VLLM_MODEL_PATH=/models/granite-embedding-125m-english \
+    -e VLLM_SPYRE_WARMUP_PROMPT_LENS=64                       \
+    -e VLLM_SPYRE_WARMUP_BATCH_SIZES=64                       \
+    --pids-limit 0                                            \
+    --userns=keep-id                                          \
+    --group-add=keep-groups                                   \
+    --memory 200GB                                            \
+    --shm-size 64GB                                           \
+    -p 8000:8000                                              \
+    {rhaiis-spyre-image}:{rhaiis-version}                \
+        --model /models/granite-embedding-125m-english        \
+        -tp 1
+----
+
+=== Re-Ranker
+
+[source,terminal,subs="attributes"]
+----
+$ SPYRE_IDS="0384:80:00.0"
+$ podman run -d                                    \
+    --device=/dev/vfio                             \
+    --name vllm-api                                \
+    -v $HOME/models:/models:Z                      \
+    -e VLLM_AIU_PCIE_IDS="${SPYRE_IDS}"            \
+    -e VLLM_MODEL_PATH=/models/bge-reranker-v2-m3  \
+    -e VLLM_SPYRE_WARMUP_PROMPT_LENS=1024          \
+    -e VLLM_SPYRE_WARMUP_BATCH_SIZES=4             \
+    --pids-limit 0                                 \
+    --userns=keep-id                               \
+    --group-add=keep-groups                        \
+    --memory 200GB                                 \
+    --shm-size 64GB                                \
+    -p 8000:8000                                   \
+    {rhaiis-spyre-image}:{rhaiis-version}     \
+        --model /models/bge-reranker-v2-m3         \
+        -tp 1
+----
